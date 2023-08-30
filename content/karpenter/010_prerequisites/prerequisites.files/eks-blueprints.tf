@@ -291,14 +291,21 @@ resource "kubectl_manifest" "kube_ops_view_deployment" {
   ]
 }
 
-resource "kubectl_manifest" "kube_ops_view_rbac" {
+resource "kubectl_manifest" "kube_ops_view_sa" {
   yaml_body = <<-YAML
-    ---
     apiVersion: v1
     kind: ServiceAccount
     metadata:
       name: kube-ops-view
-    ---
+  YAML
+
+  depends_on = [
+    module.eks_blueprints_addons
+  ]
+}
+
+resource "kubectl_manifest" "kube_ops_view_clusterrole" {
+  yaml_body = <<-YAML
     kind: ClusterRole
     apiVersion: rbac.authorization.k8s.io/v1
     metadata:
@@ -313,7 +320,15 @@ resource "kubectl_manifest" "kube_ops_view_rbac" {
       verbs:
         - get
         - list
-    ---
+  YAML
+
+  depends_on = [
+    module.eks_blueprints_addons
+  ]
+}
+
+resource "kubectl_manifest" "kube_ops_view_clusterrole_binding" {
+  yaml_body = <<-YAML
     kind: ClusterRoleBinding
     apiVersion: rbac.authorization.k8s.io/v1
     metadata:
