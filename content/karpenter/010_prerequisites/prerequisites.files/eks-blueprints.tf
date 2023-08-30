@@ -342,6 +342,10 @@ resource "kubectl_manifest" "kube_ops_view_service" {
         application: kube-ops-view
         component: frontend
       name: kube-ops-view
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: external
+        service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
     spec:
       selector:
         application: kube-ops-view
