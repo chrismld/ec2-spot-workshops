@@ -147,7 +147,10 @@ module "eks" {
       # Launch template configuration
       create_launch_template = true              # false will use the default launch template
       launch_template_os     = "amazonlinux2eks" # amazonlinux2eks or bottlerocket
-      kubelet_extra_args     = "--node-labels=intent=control-apps"
+
+      labels = {
+        intent = "control-apps"
+      }
     }
   }
 
