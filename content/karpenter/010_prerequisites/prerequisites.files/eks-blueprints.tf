@@ -14,7 +14,16 @@ terraform {
       source  = "hashicorp/helm"
       version = ">= 2.4.1"
     }
+    kubectl = {
+      source  = "gavinbunney/kubectl"
+      version = ">= 1.14"
+    }
   }
+}
+
+provider "aws" {
+  region = "us-east-1"
+  alias  = "virginia"
 }
 
 provider "aws" {
@@ -35,19 +44,20 @@ provider "helm" {
   }
 }
 
+provider "kubectl" {
+  apply_retry_count      = 10
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  load_config_file       = false
+  token                  = data.aws_eks_cluster_auth.this.token
+}
+
 data "aws_eks_cluster_auth" "this" {
   name = module.eks.cluster_name
 }
 
-data "aws_ami" "amazonlinux2eks" {
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["amazon-eks-node-${local.cluster_version}-*"]
-  }
-
-  owners = ["amazon"]
+data "aws_ecrpublic_authorization_token" "token" {
+  provider = aws.virginia
 }
 
 data "aws_availability_zones" "available" {}
@@ -57,6 +67,8 @@ locals {
   region = "--AWS_REGION--"
 
   cluster_version = "--EKS_VERSION--"
+
+  node_group_name = "managed-ondemand"
 
   vpc_cidr = "10.0.0.0/16"
   azs      = slice(data.aws_availability_zones.available.names, 0, 3)
@@ -97,14 +109,26 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  create_cloudwatch_log_group = false
+  create_cloudwatch_log_group   = false
+  create_cluster_security_group = false
+  create_node_security_group    = false
 
   manage_aws_auth_configmap = true
+  aws_auth_roles = [
+    {
+      rolearn  = module.eks_blueprints_addons.karpenter.node_iam_role_arn
+      username = "system:node:{{EC2PrivateDNSName}}"
+      groups = [
+        "system:bootstrappers",
+        "system:nodes",
+      ]
+    }
+  ]
 
   eks_managed_node_groups = {
     mg_5 = {
-      node_group_name = "mg5"
-      instance_types  = ["m4.xlarge", "m5.xlarge", "m5a.xlarge", "m5ad.xlarge", "m5d.xlarge", "t2.xlarge", "t3.xlarge", "t3a.xlarge"]
+      node_group_name = "managed-ondemand"
+      instance_types  = ["m4.large", "m5.large", "m5a.large", "m5ad.large", "m5d.large", "t2.large", "t3.large", "t3a.large"]
 
       create_security_group = false
 
@@ -113,21 +137,16 @@ module "eks" {
       desired_size = 2
       min_size     = 2
 
-      create_iam_role = false
-      iam_role_arn    = aws_iam_role.managed_ng.arn
-      disk_size       = 100
-
       # Launch template configuration
       create_launch_template = true              # false will use the default launch template
-      launch_template_os     = "amazonlinux2eks" # amazonlinux2eks or bottlerocket`
-
-      labels = {
-        intent = "control-apps"
-      }
+      launch_template_os     = "amazonlinux2eks" # amazonlinux2eks or bottlerocket
+      kubelet_extra_args     = "--node-labels=intent=control-apps"
     }
   }
 
-  tags = local.tags
+  tags = merge(local.tags, {
+    "karpenter.sh/discovery" = local.name
+  })
 }
 
 module "eks_blueprints_addons" {
@@ -141,14 +160,24 @@ module "eks_blueprints_addons" {
 
   create_delay_dependencies = [for prof in module.eks.eks_managed_node_groups : prof.node_group_arn]
 
-  enable_metrics_server = true
+  enable_aws_load_balancer_controller = true
+  enable_metrics_server               = true
+
+  enable_karpenter = true
+  karpenter = {
+    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
+    repository_password = data.aws_ecrpublic_authorization_token.token.password
+  }
+  karpenter_enable_spot_termination = true
 
   tags = local.tags
+
 }
 
 #---------------------------------------------------------------
 # Supporting Resources
 #---------------------------------------------------------------
+
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "5.0.0"
@@ -158,7 +187,7 @@ module "vpc" {
 
   azs             = local.azs
   public_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k)]
-  private_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 10)]
+  private_subnets = ["10.0.32.0/19", "10.0.64.0/19", "10.0.96.0/19"]
 
   enable_nat_gateway   = true
   single_nat_gateway   = true
@@ -180,51 +209,7 @@ module "vpc" {
   private_subnet_tags = {
     "kubernetes.io/cluster/${local.name}" = "shared"
     "kubernetes.io/role/internal-elb"     = 1
-  }
-
-  tags = local.tags
-}
-
-#---------------------------------------------------------------
-# Custom IAM roles for Node Groups
-#---------------------------------------------------------------
-data "aws_iam_policy_document" "managed_ng_assume_role_policy" {
-  statement {
-    sid = "EKSWorkerAssumeRole"
-
-    actions = [
-      "sts:AssumeRole",
-    ]
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "managed_ng" {
-  name                  = "managed-node-role"
-  description           = "EKS Managed Node group IAM Role"
-  assume_role_policy    = data.aws_iam_policy_document.managed_ng_assume_role_policy.json
-  path                  = "/"
-  force_detach_policies = true
-  managed_policy_arns = [
-    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
-    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
-    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
-    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-  ]
-
-  tags = local.tags
-}
-
-resource "aws_iam_instance_profile" "managed_ng" {
-  name = "managed-node-instance-profile"
-  role = aws_iam_role.managed_ng.name
-  path = "/"
-
-  lifecycle {
-    create_before_destroy = true
+    "karpenter.sh/discovery"              = local.name
   }
 
   tags = local.tags
