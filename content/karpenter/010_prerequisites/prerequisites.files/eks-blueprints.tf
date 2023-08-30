@@ -122,6 +122,13 @@ module "eks" {
         "system:bootstrappers",
         "system:nodes",
       ]
+    },
+    {
+      rolearn  = "arn:aws:iam::--AWS_ACCOUNT_ID--:role/WSParticipantRole"
+      username = "admin"
+      groups = [
+        "system:masters"
+      ]
     }
   ]
 
